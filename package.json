@@ -1,0 +1,37 @@
+{
+  "name": "@scu-plus/zhjw-captcha-ocr",
+  "version": "1.0.0",
+  "description": "SCU 教务处验证码 OCR 识别包：CNN 推理引擎 + 模型权重，浏览器内本地推理",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src/assets"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/fix-assets.mjs",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "captcha",
+    "ocr",
+    "cnn",
+    "scu",
+    "zhjw",
+    "browser"
+  ],
+  "license": "MIT",
+  "peerDependencies": {},
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
