@@ -10,8 +10,9 @@
 import { parseScuOcr, infer, decode, type ScuOcrModel } from './model'
 import { preprocess } from './preprocess'
 
-// 模型权重：vite 构建时作为 asset 打包（?url 导入）
-import modelUrl from './assets/zhjw-model.scuocr?url'
+// 模型权重：作为静态 asset 打包。
+// 用 new URL(..., import.meta.url) 兼容 Parcel 与 vite（二者均会将该文件复制为 asset 并返回可 fetch 的 URL）。
+const modelUrl = new URL('./assets/zhjw-model.scuocr', import.meta.url).href
 
 /** 置信度阈值：单字符最低置信度低于此值则整张返回空串 */
 export const CONFIDENCE_THRESHOLD = 0.3
