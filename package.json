@@ -13,8 +13,7 @@
     }
   },
   "files": [
-    "dist",
-    "src/assets"
+    "dist"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/fix-assets.mjs",
