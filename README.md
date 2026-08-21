@@ -11,7 +11,7 @@ CNN 推理引擎 + 模型权重，**浏览器内本地推理**，不依赖云端
 ## 特性
 
 - 纯 TypeScript 实现 CNN 算子（conv2d / maxpool / adaptiveavgpool / linear / SE 注意力），零运行时依赖
-- 模型权重内置（int8 量化，108 KB），加载快
+- 模型权重内置（int8 量化，**66 KB**，测试集整图准确率 **99.0%**，单字符 99.75%），加载快
 - 与插件仓库通过 `ZhwjCaptchaRecognizer` 接口对接（见 `ocr-package-integration.md`）
 
 ## 安装
@@ -65,21 +65,22 @@ export function createZhjwCaptchaOcr(options?: {
 
 ## 模型规格
 
-### 网络结构（含 SE 注意力）
+### 网络结构（含 SE 注意力，窄版 v1.1.0）
 
 ```
-Conv3×3(1→24) + BN + ReLU + MaxPool2×2   → 24×16×32
-Conv3×3(24→40) + BN + ReLU + MaxPool2×2  → 40×8×16
-Conv3×3(40→64) + BN + ReLU + MaxPool2×2  → 64×4×8
-Conv3×3(64→64) + BN + ReLU + MaxPool2×2  → 64×2×4
-SE 注意力（通道重标定）
-AdaptiveAvgPool2d((1,4))                 → 64×1×4 = 256
-FC1(256→120) + ReLU → Output(120→80)
+Conv3×3(1→20) + BN + ReLU + MaxPool2×2   → 20×16×32
+Conv3×3(20→32) + BN + ReLU + MaxPool2×2  → 32×8×16
+Conv3×3(32→48) + BN + ReLU + MaxPool2×2  → 48×4×8
+Conv3×3(48→48) + BN + ReLU + MaxPool2×2  → 48×2×4
+SE 注意力（48 通道，通道重标定）
+AdaptiveAvgPool2d((1,4))                 → 48×1×4 = 192
+FC1(192→96) + ReLU → Output(96→80)
 ```
 
 - 输出 `80 = 4 位 × 20 类`，逐位 argmax 解码
 - 字符集：`2345678abcdefgmnpwxy`（20 类）
 - 输入尺寸：`64 × 32`（宽 × 高），单通道
+- 参数量 67K，int8 权重 **66 KB**（原 107 KB，-38%），测试集整图准确率 **99.0%**（原 99.6%，基本无损）
 
 ### 权重格式
 
@@ -109,12 +110,18 @@ pnpm test    # vitest 单元测试
 
 模型权重由训练仓库（`zhjw-ocr`）导出。更新步骤：
 
-1. 在训练仓库导出 int8 权重：
+1. 在训练仓库导出窄版 int8 权重（如改动通道数需同步更新 `src/model.ts` 的 `infer()`）：
    ```bash
-   python export.py checkpoints/best.pt --int8 -o zhjw-model.int8.scuocr
+   python export.py checkpoints/best.narrow.pt --int8 -o zhjw-model.scuocr
    ```
 2. 复制到本仓库：`src/assets/zhjw-model.scuocr`
-3. 重新构建发布。
+3. 用 PyTorch 重新生成 `test/test_data.json`（保持推理测试与权重一致）
+4. 重新构建发布。
+
+## 变更记录
+
+- **v1.1.0**：换用窄版模型 `(20,32,48,48)/fc96`，权重 107KB → 66KB，准确率 99.6% → 99.0%
+- **v1.0.0**：初始版本，原版模型 `(24,40,64,64)/fc120`，权重 107KB
 
 ## License
 

@@ -5,14 +5,14 @@
  *   version=1: fp32（每元素 4 字节）
  *   version=2: int8（每元素 1 字节，per-tensor 对称量化，zero_point 恒为 0）
  *
- * 网络结构（含 SE 注意力）：
- *   Conv3×3(1→24)+BN+ReLU+MaxPool → 24×16×32
- *   Conv3×3(24→40)+BN+ReLU+MaxPool → 40×8×16
- *   Conv3×3(40→64)+BN+ReLU+MaxPool → 64×4×8
- *   Conv3×3(64→64)+BN+ReLU+MaxPool → 64×2×4
- *   SE 注意力（通道重标定）
- *   AdaptiveAvgPool((1,4)) → 64×1×4 = 256
- *   FC1(256→120)+ReLU → Output(120→80)
+ * 网络结构（含 SE 注意力，窄版 v1.2.0）：
+ *   Conv3×3(1→20)+BN+ReLU+MaxPool → 20×16×32
+ *   Conv3×3(20→32)+BN+ReLU+MaxPool → 32×8×16
+ *   Conv3×3(32→48)+BN+ReLU+MaxPool → 48×4×8
+ *   Conv3×3(48→48)+BN+ReLU+MaxPool → 48×2×4
+ *   SE 注意力（48 通道，reduction=16）
+ *   AdaptiveAvgPool((1,4)) → 48×1×4 = 192
+ *   FC1(192→96)+ReLU → Output(96→80)
  *
  * 注意：.scuocr 权重已做 BN 折叠（foldBnIntoConv），推理时不再单独跑 BN。
  */
@@ -113,31 +113,31 @@ function t(model: ScuOcrModel, name: string): { data: Float32Array; shape: numbe
  * @returns logits: Float32Array(80) = 4 位 × 20 类
  */
 export function infer(model: ScuOcrModel, input: Float32Array): Float32Array {
-  // ── Conv1: 1→24, 3×3, pad 1 → 24×32×64 → ReLU → MaxPool → 24×16×32
-  let x = conv2d(input, 1, 32, 64, t(model, 'conv1.weight').data, t(model, 'conv1.bias').data, 24, 3, 3, 1, 1)
+  // ── Conv1: 1→20, 3×3, pad 1 → 20×32×64 → ReLU → MaxPool → 20×16×32
+  let x = conv2d(input, 1, 32, 64, t(model, 'conv1.weight').data, t(model, 'conv1.bias').data, 20, 3, 3, 1, 1)
   relu(x.data)
   x = maxpool2d(x.data, x.c, x.h, x.w, 2, 2)
 
-  // ── Conv2: 24→40 → 40×8×16
-  x = conv2d(x.data, x.c, x.h, x.w, t(model, 'conv2.weight').data, t(model, 'conv2.bias').data, 40, 3, 3, 1, 1)
+  // ── Conv2: 20→32 → 32×8×16
+  x = conv2d(x.data, x.c, x.h, x.w, t(model, 'conv2.weight').data, t(model, 'conv2.bias').data, 32, 3, 3, 1, 1)
   relu(x.data)
   x = maxpool2d(x.data, x.c, x.h, x.w, 2, 2)
 
-  // ── Conv3: 40→64 → 64×4×8
-  x = conv2d(x.data, x.c, x.h, x.w, t(model, 'conv3.weight').data, t(model, 'conv3.bias').data, 64, 3, 3, 1, 1)
+  // ── Conv3: 32→48 → 48×4×8
+  x = conv2d(x.data, x.c, x.h, x.w, t(model, 'conv3.weight').data, t(model, 'conv3.bias').data, 48, 3, 3, 1, 1)
   relu(x.data)
   x = maxpool2d(x.data, x.c, x.h, x.w, 2, 2)
 
-  // ── Conv4: 64→64 → 64×2×4
-  x = conv2d(x.data, x.c, x.h, x.w, t(model, 'conv4.weight').data, t(model, 'conv4.bias').data, 64, 3, 3, 1, 1)
+  // ── Conv4: 48→48 → 48×2×4
+  x = conv2d(x.data, x.c, x.h, x.w, t(model, 'conv4.weight').data, t(model, 'conv4.bias').data, 48, 3, 3, 1, 1)
   relu(x.data)
   x = maxpool2d(x.data, x.c, x.h, x.w, 2, 2)
 
-  // ── SE 注意力（通道重标定）
+  // ── SE 注意力（48 通道，通道重标定）
   const c = x.c
   const h = x.h
   const w = x.w
-  // Squeeze: 全局平均池化 → (64,)
+  // Squeeze: 全局平均池化 → (48,)
   const squeezed = new Float32Array(c)
   for (let ci = 0; ci < c; ci++) {
     let sum = 0
@@ -145,11 +145,11 @@ export function infer(model: ScuOcrModel, input: Float32Array): Float32Array {
     for (let i = 0; i < h * w; i++) sum += x.data[base + i]
     squeezed[ci] = sum / (h * w)
   }
-  // fc.0: 64→4 + ReLU
-  let se = linear(squeezed, t(model, 'se.fc.0.weight').data, t(model, 'se.fc.0.bias').data, 64, 4)
+  // fc.0: 48→4 + ReLU
+  let se = linear(squeezed, t(model, 'se.fc.0.weight').data, t(model, 'se.fc.0.bias').data, 48, 4)
   relu(se)
-  // fc.2: 4→64 + Sigmoid
-  se = linear(se, t(model, 'se.fc.2.weight').data, t(model, 'se.fc.2.bias').data, 4, 64)
+  // fc.2: 4→48 + Sigmoid
+  se = linear(se, t(model, 'se.fc.2.weight').data, t(model, 'se.fc.2.bias').data, 4, 48)
   sigmoid(se)
   // Excitation: x * se.view(c,1,1)
   const excited = new Float32Array(x.data.length)
@@ -161,15 +161,15 @@ export function infer(model: ScuOcrModel, input: Float32Array): Float32Array {
     }
   }
 
-  // ── AdaptiveAvgPool((1,4)) → 64×1×4 = 256
+  // ── AdaptiveAvgPool((1,4)) → 48×1×4 = 192
   x = adaptiveAvgPool2d(excited, c, h, w, 1, 4)
 
-  // ── FC1: 256→120 + ReLU
-  let fc1 = linear(x.data, t(model, 'fc1.weight').data, t(model, 'fc1.bias').data, 256, 120)
+  // ── FC1: 192→96 + ReLU
+  let fc1 = linear(x.data, t(model, 'fc1.weight').data, t(model, 'fc1.bias').data, 192, 96)
   relu(fc1)
 
-  // ── Output: 120→80
-  const logits = linear(fc1, t(model, 'output_layer.weight').data, t(model, 'output_layer.bias').data, 120, 80)
+  // ── Output: 96→80
+  const logits = linear(fc1, t(model, 'output_layer.weight').data, t(model, 'output_layer.bias').data, 96, 80)
   return logits
 }
 
