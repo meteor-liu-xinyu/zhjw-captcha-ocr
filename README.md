@@ -11,7 +11,7 @@ CNN 推理引擎 + 模型权重，**浏览器内本地推理**，不依赖云端
 ## 特性
 
 - 纯 TypeScript 实现 CNN 算子（conv2d / maxpool / adaptiveavgpool / linear / SE 注意力），零运行时依赖
-- 模型权重内置（int8 量化，**66 KB**，测试集整图准确率 **99.0%**，单字符 99.75%），加载快
+- 模型权重内置（int4 量化，**18.9 KB**，测试集整图准确率 **99.80%**，单字符 99.95%），加载快
 - 与插件仓库通过 `ZhwjCaptchaRecognizer` 接口对接（见 `ocr-package-integration.md`）
 
 ## 安装
@@ -65,28 +65,30 @@ export function createZhjwCaptchaOcr(options?: {
 
 ## 模型规格
 
-### 网络结构（含 SE 注意力，窄版 v1.1.0）
+### 网络结构（v1.2.0 定稿：slot 头 + 空间可分离 conv4 + int4 QAT）
 
 ```
 Conv3×3(1→20) + BN + ReLU + MaxPool2×2   → 20×16×32
 Conv3×3(20→32) + BN + ReLU + MaxPool2×2  → 32×8×16
 Conv3×3(32→48) + BN + ReLU + MaxPool2×2  → 48×4×8
-Conv3×3(48→48) + BN + ReLU + MaxPool2×2  → 48×2×4
+空间可分离 Conv4（横向1×3 → 纵向3×1）   → 48×2×4
 SE 注意力（48 通道，通道重标定）
-AdaptiveAvgPool2d((1,4))                 → 48×1×4 = 192
-FC1(192→96) + ReLU → Output(96→80)
+AdaptiveAvgPool2d((1,4))                 → 48×1×4
+SlotHead（共享线性 48→20 + 每槽偏置 4×20）→ 4×20
 ```
 
 - 输出 `80 = 4 位 × 20 类`，逐位 argmax 解码
 - 字符集：`2345678abcdefgmnpwxy`（20 类）
 - 输入尺寸：`64 × 32`（宽 × 高），单通道
-- 参数量 67K，int8 权重 **66 KB**（原 107 KB，-38%），测试集整图准确率 **99.0%**（原 99.6%，基本无损）
+- 参数量 35.2K，int4 权重 **18.9 KB**（原 107 KB，-82%），测试集整图准确率 **99.80%**
 
 ### 权重格式
 
-- 文件：`src/assets/zhjw-model.scuocr`（SCUOCRLT 二进制，version=2 int8）
+- 文件：`src/assets/zhjw-model.scuocr`（SCUOCRLT 二进制，version=3，slot 头）
 - 权重已做 BN 折叠（`foldBnIntoConv`），推理时不再单独跑 BN
-- int8 对称量化：`scale = max(|w|)/127`，`zero_point = 0`
+- version=3 混合精度：int4 权重打包存储（每字节 2 值，低 4 位在前，`(q+8)&0x0F` 偏置，反解 `-8`）；偏置 int8
+- per-channel 量化：bits 字段 bit7=1 表示每输出通道独立 scale
+- 头类型按张量名判断：有 `head.fc.weight` 即 slot 头
 
 ### 预处理
 
@@ -120,6 +122,7 @@ pnpm test    # vitest 单元测试
 
 ## 变更记录
 
+- **v1.2.0**：换用定稿 int4-QAT 模型（slot 头 + 可分离 conv4），权重 66KB → 18.9KB，准确率 99.0% → 99.80%
 - **v1.1.0**：换用窄版模型 `(20,32,48,48)/fc96`，权重 107KB → 66KB，准确率 99.6% → 99.0%
 - **v1.0.0**：初始版本，原版模型 `(24,40,64,64)/fc120`，权重 107KB
 

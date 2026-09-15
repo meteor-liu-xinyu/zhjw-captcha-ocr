@@ -25,7 +25,9 @@ export interface Tensor3D {
  * @param kh     卷积核高
  * @param kw     卷积核宽
  * @param stride 步长
- * @param padding 填充
+ * @param padding 填充（高和宽相等；若 padH/padW 提供则忽略此值）
+ * @param padH   高方向填充（可选，非对称 padding 用）
+ * @param padW   宽方向填充（可选，非对称 padding 用）
  */
 export function conv2d(
   input: Float32Array,
@@ -39,9 +41,13 @@ export function conv2d(
   kw: number,
   stride: number,
   padding: number,
+  padH?: number,
+  padW?: number,
 ): Tensor3D {
-  const hOut = Math.floor((hIn + 2 * padding - kh) / stride + 1)
-  const wOut = Math.floor((wIn + 2 * padding - kw) / stride + 1)
+  const ph = padH !== undefined ? padH : padding
+  const pw = padW !== undefined ? padW : padding
+  const hOut = Math.floor((hIn + 2 * ph - kh) / stride + 1)
+  const wOut = Math.floor((wIn + 2 * pw - kw) / stride + 1)
   const out = new Float32Array(cOut * hOut * wOut)
 
   for (let co = 0; co < cOut; co++) {
@@ -50,10 +56,10 @@ export function conv2d(
         let sum = bias[co]
         for (let ci = 0; ci < cIn; ci++) {
           for (let ki = 0; ki < kh; ki++) {
-            const hi = ho * stride + ki - padding
+            const hi = ho * stride + ki - ph
             if (hi < 0 || hi >= hIn) continue
             for (let kj = 0; kj < kw; kj++) {
-              const wj = wo * stride + kj - padding
+              const wj = wo * stride + kj - pw
               if (wj < 0 || wj >= wIn) continue
               const wIdx = ((co * cIn + ci) * kh + ki) * kw + kj
               const iIdx = (ci * hIn + hi) * wIn + wj
