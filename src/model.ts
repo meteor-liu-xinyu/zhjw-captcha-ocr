@@ -2,14 +2,16 @@
  * 模型加载与推理：解析 .scuocr 权重 + CNN 前向传播。
  *
  * 支持 .scuocr 格式：
+ *   SCUOCRZ1 容器：无损压缩（magic + uint32 原长 + deflate-raw 流），
+ *     由 parseScuOcrAsync 透明解压（DecompressionStream，Chrome 103+/Node 18+）
  *   version=1: fp32（每元素 4 字节）
  *   version=2: int8（每元素 1 字节，per-tensor 对称量化，zero_point 恒为 0）
- *   version=3: 混合精度（bits 低位=位宽，bit7=per-channel 标记；int4 打包存储）
+ *   version=3: 混合精度（bits 低位=位宽，bit7=per-channel 标记；int4 打包存储，
+ *     权重 int4 打包 / 偏置 int8，均支持 per-channel scale）
  *
- * 定稿模型（v1.2.0）结构（含 SE 注意力 + 空间可分离 conv4 + slot 头）：
+ * 定稿模型（v1.3.0）结构（含 SE 注意力 + 空间可分离 conv3+4 + slot 头）：
  *   Conv3×3(1→20)+BN+ReLU+MaxPool → 20×16×32
- *   Conv3×3(20→32)+BN+ReLU+MaxPool → 32×8×16
- *   Conv3×3(32→48)+BN+ReLU+MaxPool → 48×4×8
+ *   空间可分离 conv3：横向(1×3) 32→32 + 纵向(3×1) 32→48，+ReLU+MaxPool → 48×4×8
  *   空间可分离 conv4：横向(1×3) 48→48 + 纵向(3×1) 48→48，+ReLU+MaxPool → 48×2×4
  *   SE 注意力（48 通道，reduction=16）
  *   AdaptiveAvgPool((1,4)) → 48×1×4
@@ -17,6 +19,7 @@
  *
  * 注意：.scuocr 权重已做 BN 折叠（foldBnIntoConv），推理时不再单独跑 BN。
  * 头类型按张量名判断：有 `head.fc.weight` 即 slot 头；否则 fc 头（兼容旧模型）。
+ * conv3/conv4 均按张量名探测可分离形式（有 conv{i}.h.weight 即可分离），兼容标准 3×3。
  */
 
 import { conv2d, maxpool2d, adaptiveAvgPool2d, linear, relu, sigmoid } from './cnn-ops'
@@ -141,6 +144,58 @@ export function parseScuOcr(buffer: ArrayBuffer): ScuOcrModel {
   return { tensors, version }
 }
 
+/**
+ * SCUOCRZ1 无损压缩容器解压（deflate-raw，浏览器 DecompressionStream 原生支持）。
+ *
+ * 兼容性：Chrome 103+（2022-06）/ Firefox 113+ / Safari 16.4+（2023-03）/ Node 18+。
+ * 不支持时抛出带明确指引的错误（调用方可据此提示升级浏览器）。
+ */
+async function inflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
+  if (typeof DecompressionStream !== 'function') {
+    throw new Error(
+      'DecompressionStream is not available in this browser. ' +
+        'The compressed model (SCUOCRZ1) requires Chrome 103+ / Firefox 113+ / Safari 16.4+.',
+    )
+  }
+  const stream = new Blob([bytes as BlobPart])
+    .stream()
+    .pipeThrough(new DecompressionStream('deflate-raw'))
+  const chunks: Uint8Array[] = []
+  const reader = stream.getReader()
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    chunks.push(value)
+  }
+  const total = chunks.reduce((a, c) => a + c.length, 0)
+  const out = new Uint8Array(total)
+  let off = 0
+  for (const c of chunks) {
+    out.set(c, off)
+    off += c.length
+  }
+  return out
+}
+
+/**
+ * 解析 .scuocr（自动识别 SCUOCRZ1 压缩容器并解压）。
+ *
+ * 容器布局：magic "SCUOCRZ1"(8B) + 原始长度 uint32 LE(4B) + deflate-raw 流。
+ * 内层是普通 .scuocr（magic "SCUOCRLT"）。压缩是无损的，解析结果与未压缩版逐位一致。
+ */
+export async function parseScuOcrAsync(buffer: ArrayBuffer): Promise<ScuOcrModel> {
+  const magic = new TextDecoder().decode(new Uint8Array(buffer, 0, 8))
+  if (magic === 'SCUOCRZ1') {
+    const ulen = new DataView(buffer).getUint32(8, true)
+    const raw = await inflateRaw(new Uint8Array(buffer, 12))
+    if (raw.length !== ulen) {
+      throw new Error(`SCUOCRZ1 decompress length mismatch: got ${raw.length}, expect ${ulen}`)
+    }
+    return parseScuOcr(raw.buffer as ArrayBuffer)
+  }
+  return parseScuOcr(buffer)
+}
+
 /** int4 打包数据长度（每字节 2 值，向上取整）。 */
 function quantBytes(bits: number, n: number): number {
   return bits === 8 ? n : Math.ceil(n / 2)
@@ -180,6 +235,25 @@ function t(model: ScuOcrModel, name: string): { data: Float32Array; shape: numbe
 }
 
 /**
+ * 空间可分离卷积（h: 1×3 横向 + v: 3×1 纵向）的统一执行。
+ * h 层无偏置（训练/导出约定），v 层有偏置。
+ */
+function convHv(
+  model: ScuOcrModel,
+  i: number,
+  x: { data: Float32Array; c: number; h: number; w: number },
+  cOut: number,
+): { data: Float32Array; c: number; h: number; w: number } {
+  const hW = t(model, `conv${i}.h.weight`).data
+  // (1,3) 卷积：kh=1, kw=3, padH=0, padW=1
+  x = conv2d(x.data, x.c, x.h, x.w, hW, new Float32Array(x.c), x.c, 1, 3, 1, 1, 0, 1)
+  const vW = t(model, `conv${i}.v.weight`).data
+  const vB = t(model, `conv${i}.v.bias`).data
+  // (3,1) 卷积：kh=3, kw=1, padH=1, padW=0
+  return conv2d(x.data, x.c, x.h, x.w, vW, vB, cOut, 3, 1, 1, 1, 1, 0)
+}
+
+/**
  * 前向推理。
  *
  * @param model 解析后的模型
@@ -197,19 +271,18 @@ export function infer(model: ScuOcrModel, input: Float32Array): Float32Array {
   relu(x.data)
   x = maxpool2d(x.data, x.c, x.h, x.w, 2, 2)
 
-  // ── Conv3: 32→48 → 48×4×8
-  x = conv2d(x.data, x.c, x.h, x.w, t(model, 'conv3.weight').data, t(model, 'conv3.bias').data, 48, 3, 3, 1, 1)
+  // ── Conv3: 32→48。空间可分离（conv3.h(1×3) + conv3.v(3×1)）或标准 3×3
+  if (model.tensors.has('conv3.h.weight')) {
+    x = convHv(model, 3, x, 48)
+  } else {
+    x = conv2d(x.data, x.c, x.h, x.w, t(model, 'conv3.weight').data, t(model, 'conv3.bias').data, 48, 3, 3, 1, 1)
+  }
   relu(x.data)
   x = maxpool2d(x.data, x.c, x.h, x.w, 2, 2)
 
   // ── Conv4: 48→48。空间可分离（conv4.h(1×3) + conv4.v(3×1)）或标准 3×3
   if (model.tensors.has('conv4.h.weight')) {
-    // 横向 (1,3) pad=(0,1) → 48×2×4；再纵向 (3,1) pad=(1,0) → 48×2×4
-    const hW = t(model, 'conv4.h.weight').data
-    x = conv2d(x.data, x.c, x.h, x.w, hW, new Float32Array(x.c), x.c, 1, 3, 1, 1, 0, 1)
-    const vW = t(model, 'conv4.v.weight').data
-    const vB = t(model, 'conv4.v.bias').data
-    x = conv2d(x.data, x.c, x.h, x.w, vW, vB, x.c, 3, 1, 1, 1, 1, 0)
+    x = convHv(model, 4, x, 48)
   } else {
     x = conv2d(x.data, x.c, x.h, x.w, t(model, 'conv4.weight').data, t(model, 'conv4.bias').data, 48, 3, 3, 1, 1)
   }
@@ -295,12 +368,24 @@ export function infer(model: ScuOcrModel, input: Float32Array): Float32Array {
 }
 
 /**
- * 解码 logits (80 = 4×20) → 4 位字符 + 最低置信度。
+ * 解码 logits (80 = 4×20) → 4 位字符 + 两种置信度指标。
  * 逐位 softmax + argmax。
+ *
+ * 置信度指标（校准结论见 out/confidence_calibration.json，2026-09-24）：
+ *   confidence = min over slots of p_top1 —— 旧指标，int4 量化后会系统性漂移，
+ *     阈值不可跨模型版本复用；
+ *   margin     = min over slots of (p_top1 − p_top2) —— 跨模型版本稳定
+ *     （错误图 margin 中位 0.13/0.24/0.13），**重试判定请用 margin**，
+ *     阈值 0.30（更保守可到 0.40）。
  */
-export function decode(logits: Float32Array): { text: string; confidence: number } {
+export function decode(logits: Float32Array): {
+  text: string
+  confidence: number
+  margin: number
+} {
   let text = ''
   let minConf = 1
+  let minMargin = 1
   for (let pos = 0; pos < CAPTCHA_LEN; pos++) {
     const start = pos * NUM_CLASSES
     // softmax
@@ -323,8 +408,15 @@ export function decode(logits: Float32Array): { text: string; confidence: number
         bestIdx = j
       }
     }
+    // top2 概率差（margin）
+    let secondProb = -1
+    for (let j = 0; j < NUM_CLASSES; j++) {
+      if (j !== bestIdx && probs[j] > secondProb) secondProb = probs[j]
+    }
     text += CHARSET[bestIdx]
     if (bestProb < minConf) minConf = bestProb
+    const margin = bestProb - secondProb
+    if (margin < minMargin) minMargin = margin
   }
-  return { text, confidence: minConf }
+  return { text, confidence: minConf, margin: minMargin }
 }

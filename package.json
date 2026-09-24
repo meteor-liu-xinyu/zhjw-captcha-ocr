@@ -1,7 +1,7 @@
 {
   "name": "@scu-plus/zhjw-captcha-ocr",
-  "version": "1.2.0",
-  "description": "SCU 教务处验证码 OCR 识别包：CNN 推理引擎 + 模型权重，浏览器内本地推理（v1.2.0 换用 18.9KB int4-QAT 定稿模型：slot 头 + 可分离卷积，99.80%）",
+  "version": "1.3.0",
+  "description": "SCU 教务处验证码 OCR 识别包：CNN 推理引擎 + 模型权重，浏览器内本地推理（v1.3.0 换用 14.8KB 定稿模型：SCUOCRZ1 压缩 + bias int8 + margin 重试阈值，99.80%）",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

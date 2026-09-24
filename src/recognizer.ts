@@ -7,14 +7,25 @@
  *     置信度不足或图片不可用时返回空串 ""
  */
 
-import { parseScuOcr, infer, decode, type ScuOcrModel } from './model'
+import { parseScuOcrAsync, infer, decode, type ScuOcrModel } from './model'
 import { preprocess } from './preprocess'
 
-// 模型权重：作为静态 asset 打包。
+// 模型权重：作为静态 asset 打包（SCUOCRZ1 无损压缩版，14.8KB / 整图 99.80%）。
 // 用 new URL(..., import.meta.url) 兼容 Parcel 与 vite（二者均会将该文件复制为 asset 并返回可 fetch 的 URL）。
 const modelUrl = new URL('./assets/zhjw-model.scuocr', import.meta.url).href
 
-/** 置信度阈值：单字符最低置信度低于此值则整张返回空串 */
+/**
+ * 重试判定的 margin 阈值（2026-09-24 校准，out/confidence_calibration.json）：
+ * margin = min over 4 slots of (p_top1 − p_top2)，低于此值时 recognize 返回空串
+ * （由调用方触发验证码刷新）。阈值 0.30 跨模型版本稳定；更保守可用 0.40。
+ */
+export const MARGIN_THRESHOLD = 0.3
+
+/**
+ * 旧版置信度阈值（min-char 概率）—— **已废弃，仅为兼容保留导出**。
+ * int4 量化后 min-prob 会系统性漂移（1% 分位 0.56 → 0.41），阈值不可跨版本复用，
+ * 判定请用 MARGIN_THRESHOLD。
+ */
 export const CONFIDENCE_THRESHOLD = 0.3
 
 export interface ZhjwCaptchaRecognizer {
@@ -48,9 +59,10 @@ export function createZhjwCaptchaOcr(options: ZhjwCaptchaOcrOptions = {}): ZhjwC
           if (!res.ok) throw new Error(`Failed to fetch model: ${res.status} ${res.statusText}`)
           return res.arrayBuffer()
         })
-        .then((buf) => {
-          model = parseScuOcr(buf)
-          return model
+        .then((buf) => parseScuOcrAsync(buf))
+        .then((m) => {
+          model = m
+          return m
         })
         .catch((err) => {
           loading = null // 允许重试
@@ -93,10 +105,10 @@ export function createZhjwCaptchaOcr(options: ZhjwCaptchaOcrOptions = {}): ZhjwC
       // 预处理 → 推理 → 解码
       const input = preprocess(imageData)
       const logits = infer(m, input)
-      const { text, confidence } = decode(logits)
+      const { text, margin } = decode(logits)
 
-      // 置信度不足返回空串
-      if (confidence < CONFIDENCE_THRESHOLD) return ''
+      // margin 不足（top1 与 top2 差距太小）返回空串，由调用方触发刷新重试
+      if (margin < MARGIN_THRESHOLD) return ''
       return text
     },
   }

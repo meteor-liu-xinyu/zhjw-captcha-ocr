@@ -11,7 +11,9 @@ CNN 推理引擎 + 模型权重，**浏览器内本地推理**，不依赖云端
 ## 特性
 
 - 纯 TypeScript 实现 CNN 算子（conv2d / maxpool / adaptiveavgpool / linear / SE 注意力），零运行时依赖
-- 模型权重内置（int4 量化，**18.9 KB**，测试集整图准确率 **99.80%**，单字符 99.95%），加载快
+- 模型权重内置（int4 权重 + bias int8 + **SCUOCRZ1 无损压缩**，**14.8 KB**，测试集整图准确率 **99.80%**，单字符 99.95%）
+- 低置信度重试判定用 **margin 指标**（top1−top2 的最小值，阈值 0.30），跨模型版本稳定；
+  旧的 min-char 概率阈值在 int4 量化后会系统性漂移，不可复用（校准数据见训练仓库 out/confidence_calibration.json）
 - 与插件仓库通过 `ZhwjCaptchaRecognizer` 接口对接（见 `ocr-package-integration.md`）
 
 ## 安装

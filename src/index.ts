@@ -14,9 +14,19 @@
 export {
   createZhjwCaptchaOcr,
   CONFIDENCE_THRESHOLD,
+  MARGIN_THRESHOLD,
   type ZhjwCaptchaRecognizer,
   type ZhjwCaptchaOcrOptions,
 } from './recognizer'
 
-export { CHARSET, CAPTCHA_LEN, NUM_CLASSES, parseScuOcr, infer, decode, type ScuOcrModel } from './model'
+export {
+  CHARSET,
+  CAPTCHA_LEN,
+  NUM_CLASSES,
+  parseScuOcr,
+  parseScuOcrAsync,
+  infer,
+  decode,
+  type ScuOcrModel,
+} from './model'
 export { preprocess } from './preprocess'
